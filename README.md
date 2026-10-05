@@ -1,83 +1,143 @@
-# Airis Labs – GCP K3s PostgreSQL Infrastructure
+## Complete Manual Deployment Runbook
 
-## Overview
+This section documents the complete deployment procedure so the environment can be rebuilt from a clean machine without relying on undocumented manual steps.
 
-This project provisions a small GCP environment for running PostgreSQL on K3s using CloudNativePG (CNPG).
-
-The main goals are:
-
-- Provision the GCP infrastructure using Terraform.
-- Keep the K3s VM private, with no external IP.
-- Use a Bastion host as the approved entry point.
-- Allow the private K3s VM outbound Internet access through Cloud NAT.
-- Deploy PostgreSQL using CloudNativePG.
-- Expose PostgreSQL only through the approved private network path.
-- Validate database connectivity from the Bastion using Python.
-- Keep the design simple for the exercise while documenting production considerations and future improvements.
-
----
-
-## Architecture
+### Deployment Flow
 
 ```text
-                         Internet
-                            |
-                            | SSH
-                            v
-                  +-------------------+
-                  |     Bastion VM    |
-                  |   External IP     |
-                  |   10.0.0.10       |
-                  +-------------------+
-                       |          |
-                 SSH/22|          |TCP/30432
-                       |          |
-                       v          v
-                  +-------------------+
-                  |      K3s VM       |
-                  |   10.0.0.20       |
-                  | No External IP    |
-                  +-------------------+
-                            |
-                            |
-                      Kubernetes
-                            |
-                  +-------------------+
-                  | CloudNativePG     |
-                  | PostgreSQL        |
-                  | Persistent PVC    |
-                  +-------------------+
-
-K3s outbound Internet access
-            |
-            v
-     Cloud NAT / Router
-            |
-            v
-         Internet
+Clean Machine
+      |
+      v
+Check / Install Prerequisites
+      |
+      +--> Git
+      +--> Terraform
+      +--> Google Cloud CLI
+      +--> SSH
+      |
+      v
+Clone Repository
+      |
+      v
+Authenticate to GCP
+      |
+      v
+Terraform
+      |
+      +--> terraform init
+      +--> terraform validate
+      +--> terraform plan
+      +--> terraform apply
+      |
+      v
+GCP Infrastructure
+      |
+      +--> VPC / Subnet
+      +--> Firewall Rules
+      +--> Cloud Router / NAT
+      +--> Bastion VM
+      +--> Private K3s VM
+      |
+      v
+Configure SSH / ProxyJump
+      |
+      v
+Bootstrap K3s VM
+      |
+      +--> Install K3s
+      +--> Configure kubectl
+      +--> Install Helm
+      +--> Install CNPG Operator
+      |
+      v
+Deploy PostgreSQL
+      |
+      +--> CNPG Cluster
+      +--> Persistent Storage
+      +--> NodePort Service
+      |
+      v
+Prepare Bastion
+      |
+      +--> Python
+      +--> pip
+      +--> venv
+      +--> psycopg
+      +--> telnet
+      |
+      v
+Validate Network Path
+      |
+      v
+Run Python DB Validation
+      |
+      +--> Connect to PostgreSQL
+      +--> Authenticate
+      +--> SELECT 1
+      |
+      v
+Final Verification
+      |
+      v
+Environment Ready
 ```
-
-Both VMs currently reside in the same private subnet.
-
-Network access is controlled using GCP firewall rules. The Bastion is allowed to reach only the required services on the K3s VM.
-
-For this small exercise, a single subnet keeps the architecture simple. In a larger production environment, I would consider separate subnets and security boundaries for Bastion/public-facing components and private workloads.
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
-The machine running Terraform should have:
+Check that the required tools are available:
 
-- Git
-- Terraform
-- Google Cloud CLI (`gcloud`)
-- SSH client
+```bash
+git --version
+terraform --version
+gcloud --version
+ssh -V
+```
 
-Authenticate to GCP before starting:
+### Install Terraform on macOS
+
+If Homebrew is available:
+
+```bash
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform
+```
+
+Verify:
+
+```bash
+terraform --version
+```
+
+If Terraform is already installed, do not reinstall it.
+
+---
+
+## 2. Clone the Repository
+
+```bash
+git clone <repository-url>
+cd project-c67
+```
+
+Verify the repository contents:
+
+```bash
+ls -la
+```
+
+---
+
+## 3. Authenticate to Google Cloud
 
 ```bash
 gcloud auth login
+```
+
+Configure Application Default Credentials for Terraform:
+
+```bash
 gcloud auth application-default login
 ```
 
@@ -87,11 +147,17 @@ Verify the active project:
 gcloud config get-value project
 ```
 
+If necessary:
+
+```bash
+gcloud config set project <PROJECT_ID>
+```
+
 ---
 
-## 1. Provision the Infrastructure
+## 4. Provision the Infrastructure with Terraform
 
-Go to the Terraform directory:
+Move to the Terraform directory if the repository uses a dedicated Terraform directory:
 
 ```bash
 cd terraform
@@ -103,81 +169,132 @@ Initialize Terraform:
 terraform init
 ```
 
-Review the proposed infrastructure changes:
+Validate the configuration:
+
+```bash
+terraform validate
+```
+
+Review the execution plan:
 
 ```bash
 terraform plan
 ```
 
-Provision the environment:
+Provision the infrastructure:
 
 ```bash
 terraform apply
 ```
 
-Do not run `terraform apply` without reviewing the plan first.
+Review the plan before confirming the apply.
 
-Terraform provisions the required GCP infrastructure, including:
-
-- VPC
-- Subnet
-- Bastion VM
-- Private K3s VM
-- Firewall rules
-- Cloud Router
-- Cloud NAT
-
-The K3s VM intentionally has no public IP.
-
----
-
-## 2. Verify the Infrastructure
-
-After Terraform completes, verify the VM addresses.
-
-The expected design is similar to:
+Terraform provisions the GCP infrastructure, including:
 
 ```text
+VPC
+Subnet
+Bastion VM
+Private K3s VM
+Firewall Rules
+Cloud Router
+Cloud NAT
+```
+
+The K3s VM must not have a public IP.
+
+---
+
+## 5. Verify the Infrastructure
+
+Verify the VM addresses.
+
+Expected architecture:
+
+```text
+Bastion VM
+  Private IP:  10.0.0.10
+  External IP: Assigned
+
+K3s VM
+  Private IP:  10.0.0.20
+  External IP: None
+```
+
+The Bastion is the approved entry point into the private environment.
+
+The K3s VM uses Cloud NAT for outbound Internet connectivity.
+
+---
+
+## 6. Configure SSH / ProxyJump
+
+Create or edit:
+
+```bash
+~/.ssh/config
+```
+
+Example configuration:
+
+```text
+Host bastion
+    HostName <BASTION_PUBLIC_IP>
+    User <SSH_USER>
+    IdentityFile ~/.ssh/<PRIVATE_KEY>
+
+Host k3s
+    HostName 10.0.0.20
+    User <SSH_USER>
+    IdentityFile ~/.ssh/<PRIVATE_KEY>
+    ProxyJump bastion
+```
+
+Set the correct permissions:
+
+```bash
+chmod 600 ~/.ssh/config
+```
+
+Test the Bastion:
+
+```bash
+ssh bastion
+```
+
+Test K3s through the Bastion:
+
+```bash
+ssh k3s
+```
+
+The resulting path is:
+
+```text
+Local Machine
+      |
+      | SSH
+      v
 Bastion
-Private IP:  10.0.0.10
-External IP: Assigned
-
+10.0.0.10
+      |
+      | ProxyJump / SSH
+      v
 K3s
-Private IP:  10.0.0.20
-External IP: None
+10.0.0.20
 ```
-
-The Bastion is the trusted entry point into the environment.
 
 ---
 
-## 3. Connect to the K3s VM
+## 7. Install K3s
 
-Connect first to the Bastion:
-
-```bash
-ssh <user>@<BASTION_PUBLIC_IP>
-```
-
-From the Bastion, connect to K3s:
+Connect to the K3s VM:
 
 ```bash
-ssh <user>@10.0.0.20
+ssh k3s
 ```
 
-Alternatively, SSH ProxyJump can be used from the local machine:
-
-```bash
-ssh -J <user>@<BASTION_PUBLIC_IP> <user>@10.0.0.20
-```
-
-The K3s VM is never accessed directly from the Internet.
-
----
-
-## 4. Install K3s
-
-On the K3s VM:
+Install K3s:
 
 ```bash
 curl -sfL https://get.k3s.io | sh -
@@ -189,19 +306,19 @@ Verify the service:
 sudo systemctl status k3s
 ```
 
-Verify the node:
+Verify the Kubernetes node:
 
 ```bash
 sudo k3s kubectl get nodes
 ```
 
-Expected result:
+The node should report:
 
 ```text
-STATUS: Ready
+Ready
 ```
 
-Configure `kubectl` access as required for the current user.
+Configure `kubectl` access for the current user as required.
 
 Verify:
 
@@ -211,9 +328,9 @@ kubectl get nodes
 
 ---
 
-## 5. Install Helm
+## 8. Install Helm
 
-Install Helm on the K3s VM:
+On the K3s VM:
 
 ```bash
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
@@ -227,7 +344,7 @@ helm version
 
 ---
 
-## 6. Install CloudNativePG
+## 9. Install CloudNativePG
 
 Add the CloudNativePG Helm repository:
 
@@ -245,19 +362,19 @@ helm install cnpg \
   cnpg/cloudnative-pg
 ```
 
-Verify that the operator is running:
+Verify:
 
 ```bash
 kubectl get pods -n cnpg-system
 ```
 
-Wait until the CNPG Operator is `Running` and `Ready` before deploying PostgreSQL.
+Do not continue until the CNPG Operator is `Running` and `Ready`.
 
 ---
 
-## 7. Deploy PostgreSQL
+## 10. Deploy PostgreSQL
 
-Apply the PostgreSQL cluster manifest:
+Apply the PostgreSQL cluster:
 
 ```bash
 kubectl apply -f kubernetes/postgres-cluster.yaml
@@ -269,7 +386,7 @@ Verify:
 kubectl get clusters -n cnpg-system
 ```
 
-Check the PostgreSQL pods:
+Check the pods:
 
 ```bash
 kubectl get pods -n cnpg-system
@@ -281,22 +398,11 @@ Check persistent storage:
 kubectl get pvc -n cnpg-system
 ```
 
-The current `1Gi` storage size is intended for the exercise only.
-
-Production sizing should be based on workload requirements such as:
-
-- Current database size
-- Expected growth
-- WAL generation
-- Retention requirements
-- Index size
-- Read/write workload
-- IOPS and throughput
-- Required storage headroom
+The PostgreSQL PVC should be `Bound`.
 
 ---
 
-## 8. Expose PostgreSQL Through the Approved Path
+## 11. Deploy the PostgreSQL NodePort
 
 Apply the NodePort service:
 
@@ -310,287 +416,191 @@ Verify:
 kubectl get svc -n cnpg-system
 ```
 
-PostgreSQL is reachable through:
+Expected private endpoint:
 
 ```text
 10.0.0.20:30432
 ```
 
-This is the **private IP** of the K3s VM.
-
-The GCP firewall allows TCP port `30432` only from the Bastion private IP:
+The GCP firewall should allow TCP/30432 only from the Bastion private IP:
 
 ```text
+Source:
 10.0.0.10/32
-```
 
-PostgreSQL is therefore not intentionally exposed directly to the Internet.
+Destination:
+K3s VM
+
+Port:
+TCP/30432
+```
 
 ---
 
-## 9. Prepare the Bastion for Validation
+## 12. Prepare the Bastion
 
 Connect to the Bastion:
 
 ```bash
-ssh <user>@<BASTION_PUBLIC_IP>
+ssh bastion
+```
+
+Update the package index:
+
+```bash
+sudo apt update
 ```
 
 Install the required packages:
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip telnet
+sudo apt install -y python3 python3-pip python3-venv telnet
 ```
 
 Create a Python virtual environment:
 
 ```bash
 python3 -m venv venv
+```
+
+Activate it:
+
+```bash
 source venv/bin/activate
 ```
 
-Install the PostgreSQL Python driver required by the validation script:
+Upgrade pip if required:
 
 ```bash
-pip install psycopg[binary]
+python -m pip install --upgrade pip
+```
+
+Install the PostgreSQL Python driver:
+
+```bash
+pip install "psycopg[binary]"
+```
+
+Verify:
+
+```bash
+python --version
+pip list
 ```
 
 ---
 
-## 10. Validate Network Connectivity
+## 13. Validate the Network Path
 
-From the Bastion, test that the PostgreSQL NodePort is reachable:
+From the Bastion:
 
 ```bash
 telnet 10.0.0.20 30432
 ```
 
-This verifies the basic TCP network path:
+This validates the TCP path:
 
 ```text
 Bastion
-   |
-   | TCP/30432
-   v
-K3s private IP
-   |
-   v
+10.0.0.10
+      |
+      | TCP/30432
+      v
+K3s
+10.0.0.20
+      |
+      | NodePort
+      v
 PostgreSQL
 ```
 
-The same port should not be publicly exposed through the K3s VM because the VM has no external IP.
+This is a private network path. PostgreSQL is not intentionally exposed directly to the Internet.
 
 ---
 
-## 11. Validate PostgreSQL with Python
+## 14. Run the Python Validation
 
-Run the validation script from the Bastion:
+Activate the Python virtual environment if it is not already active:
 
 ```bash
-python validate_db.py
+source venv/bin/activate
 ```
 
-The script connects to PostgreSQL and executes:
+Run:
 
-```sql
-SELECT 1;
+```bash
+python3 validate_db.py
 ```
 
-A successful result proves:
+The validation script should:
 
-- Network connectivity from the Bastion
-- PostgreSQL is accepting connections
-- Authentication works
-- Basic SQL query execution works
+```text
+Connect to PostgreSQL
+        |
+        v
+Authenticate
+        |
+        v
+Execute SELECT 1
+        |
+        v
+Verify result = 1
+```
 
-It does **not** prove:
+A successful `SELECT 1` validates basic network connectivity, authentication, database availability, and SQL execution.
 
-- Database performance
-- High availability
-- Replication health
-- Application schema correctness
-- Storage capacity
-- Production readiness
+It does not prove HA, replication health, performance, storage capacity, or full production readiness.
 
 ---
 
-## 12. Troubleshooting
+## 15. Final Verification
 
-### Kubernetes
-
-Check pods:
+Before considering the deployment complete, verify:
 
 ```bash
+kubectl get nodes
 kubectl get pods -A
+kubectl get clusters -n cnpg-system
+kubectl get pvc -n cnpg-system
+kubectl get svc -n cnpg-system
 ```
 
-Inspect a failing pod:
+Confirm:
 
-```bash
-kubectl describe pod <pod-name> -n <namespace>
+```text
+[ ] Terraform apply completed successfully
+[ ] Bastion is reachable
+[ ] K3s VM has NO public IP
+[ ] K3s VM can reach the Internet through Cloud NAT
+[ ] SSH ProxyJump works
+[ ] K3s node is Ready
+[ ] CNPG Operator is Ready
+[ ] PostgreSQL is Ready
+[ ] PVC is Bound
+[ ] NodePort exists on TCP/30432
+[ ] TCP/30432 is allowed only from the Bastion
+[ ] Bastion can reach PostgreSQL
+[ ] Python validation succeeds
+[ ] SELECT 1 returns 1
 ```
-
-Check logs:
-
-```bash
-kubectl logs <pod-name> -n <namespace>
-```
-
-For a restarting container:
-
-```bash
-kubectl logs <pod-name> -n <namespace> --previous
-```
-
-Check recent Kubernetes events:
-
-```bash
-kubectl get events -A --sort-by=.lastTimestamp
-```
-
-### CloudNativePG
-
-Check the PostgreSQL cluster:
-
-```bash
-kubectl get cluster -n cnpg-system
-```
-
-Check the CNPG Operator:
-
-```bash
-kubectl get pods -n cnpg-system
-```
-
-If the CNPG Operator fails while PostgreSQL is already running, the database may continue serving traffic, but CNPG reconciliation, lifecycle management, and automated recovery capabilities are degraded.
-
-### OOMKilled
-
-If a container reports `OOMKilled`, check:
-
-- Memory requests
-- Memory limits
-- Actual memory usage
-- Node memory pressure
-- PostgreSQL workload/configuration
-
-Do not increase memory blindly before understanding the cause.
 
 ---
 
-## 13. Destroy the Environment
+## 16. Destroy the Environment
 
-Before destroying anything, review what Terraform manages:
-
-```bash
-terraform plan
-```
-
-Destroy the GCP infrastructure:
+When the environment is no longer required:
 
 ```bash
 terraform destroy
 ```
 
-Review the destroy plan carefully before confirming.
+Review the destroy plan before confirming.
 
 ---
 
-## Current Limitations
+## 17. Automation – Next Step
 
-This implementation intentionally keeps the exercise small.
-
-Current limitations include:
-
-- Single K3s node
-- Single infrastructure failure domain
-- No infrastructure-level HA
-- PostgreSQL storage depends on the current single-node design
-- Manual K3s bootstrap
-- Manual Helm installation
-- Manual CNPG deployment
-- Manual Bastion preparation
-- No automated external database backup
-- Terraform state currently needs a production-grade remote backend strategy
-
-Setting multiple PostgreSQL instances on the same single K3s node would **not** provide infrastructure HA because a failure of that VM would affect all instances.
-
----
-
-## Production Improvements
-
-For a production environment I would consider:
-
-- Multiple Kubernetes nodes
-- Multiple failure domains/zones
-- CNPG PostgreSQL replication and failover
-- External database backups
-- Backup retention policies
-- Regular restore testing
-- Remote Terraform state
-- Strict IAM for Terraform state
-- Separate network/security tiers where appropriate
-- Secret Manager or another dedicated secret-management mechanism
-- Monitoring and alerting
-- Resource requests and limits based on measured workload
-- Automated bootstrap/configuration management
-
----
-
-## Automation – Next Step
-
-The current README documents the complete deployment procedure so the environment can be reproduced without relying on undocumented manual knowledge.
-
-The next step is to automate the remaining configuration.
-
-Target workflow:
-
-```text
-./up.sh
-   |
-   +-- terraform init/apply
-   |
-   +-- wait for infrastructure
-   |
-   +-- bootstrap K3s
-   |     +-- install K3s
-   |     +-- install Helm
-   |     +-- install CNPG
-   |     +-- deploy PostgreSQL
-   |     +-- deploy NodePort
-   |
-   +-- bootstrap Bastion
-   |     +-- install Python
-   |     +-- create venv
-   |     +-- install psycopg
-   |
-   +-- verify
-         +-- Kubernetes Ready
-         +-- CNPG Ready
-         +-- PostgreSQL Ready
-         +-- SELECT 1 succeeds
-```
-
-Teardown:
-
-```bash
-./down.sh
-```
-
-The goal is for the repository to become fully reproducible:
-
-```bash
-git clone <repository>
-cd <repository>
-./up.sh
-```
-
-and rebuild the complete environment from scratch.
-
----
-
-## Repository Structure
+Once this manual runbook works reliably end-to-end, the same deployment flow will be converted into idempotent automation.
 
 Target repository structure:
 
@@ -598,72 +608,67 @@ Target repository structure:
 .
 ├── README.md
 ├── terraform/
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   └── ...
-│
 ├── kubernetes/
 │   ├── postgres-cluster.yaml
 │   └── postgres-nodeport.yaml
-│
 ├── scripts/
 │   ├── bootstrap-k3s.sh
 │   ├── bootstrap-bastion.sh
 │   └── verify.sh
-│
 ├── validate_db.py
 ├── up.sh
 └── down.sh
 ```
 
----
-
-## Security Notes
-
-The Bastion is a high-trust component.
-
-If compromised, an attacker may attempt to access services explicitly permitted by firewall rules, including SSH to the K3s VM and the PostgreSQL NodePort.
-
-For that reason:
-
-- Expose only required ports.
-- Restrict firewall source ranges.
-- Avoid storing long-lived credentials on the Bastion.
-- Keep the K3s VM without a public IP.
-- Use least-privilege IAM.
-- Treat database credentials and Terraform state as sensitive data.
-
----
-
-## Design Philosophy
-
-This exercise deliberately favors a small, understandable architecture over unnecessary complexity.
-
-The important distinction is between:
+Target automated flow:
 
 ```text
-Lab / Exercise
-      vs.
-Production Architecture
+./up.sh
+   |
+   +--> Terraform init / plan / apply
+   |
+   +--> Wait for infrastructure
+   |
+   +--> Configure SSH access
+   |
+   +--> bootstrap-k3s.sh
+   |       |
+   |       +--> Install K3s
+   |       +--> Install Helm
+   |       +--> Install CNPG
+   |       +--> Deploy PostgreSQL
+   |       +--> Deploy NodePort
+   |
+   +--> bootstrap-bastion.sh
+   |       |
+   |       +--> Install Python
+   |       +--> Install pip / venv
+   |       +--> Install psycopg
+   |
+   +--> verify.sh
+           |
+           +--> K3s Ready
+           +--> CNPG Ready
+           +--> PostgreSQL Ready
+           +--> PVC Bound
+           +--> Network path reachable
+           +--> SELECT 1 succeeds
 ```
 
-The current design demonstrates:
+The final goal is:
 
-```text
-Infrastructure as Code
-        +
-Private networking
-        +
-Controlled access
-        +
-Kubernetes
-        +
-CloudNativePG
-        +
-Persistent storage
-        +
-Application-level validation
+```bash
+git clone <repository-url>
+cd project-c67
+./up.sh
 ```
 
-The remaining manual steps are explicitly documented and are intended to be progressively replaced by idempotent automation.
+and have the complete environment rebuilt from scratch.
+
+Teardown:
+
+```bash
+./down.sh
+```
+
+This keeps Terraform responsible for infrastructure provisioning while the bootstrap scripts handle operating-system, K3s, Kubernetes, PostgreSQL, and validation configuration.
