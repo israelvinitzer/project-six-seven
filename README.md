@@ -45,7 +45,7 @@ Configure SSH / ProxyJump
 Bootstrap K3s VM
       |
       +--> Install K3s
-      +--> Configure kubectl
+      +--> Configure kb 
       +--> Install Helm
       +--> Install CNPG Operator
       |
@@ -214,7 +214,7 @@ Expected architecture:
 ```text
 Bastion VM
   Private IP:  10.0.0.10
-  External IP: Assigned
+  External IP: Assigned # gcloud compute instances list to get the public ip
 
 K3s VM
   Private IP:  10.0.0.20
@@ -309,7 +309,7 @@ sudo systemctl status k3s
 Verify the Kubernetes node:
 
 ```bash
-sudo k3s kubectl get nodes
+sudo k3s kb  get nodes
 ```
 
 The node should report:
@@ -318,12 +318,12 @@ The node should report:
 Ready
 ```
 
-Configure `kubectl` access for the current user as required.
+Configure `kb ` access for the current user as required.
 
 Verify:
 
 ```bash
-kubectl get nodes
+kb  get nodes
 ```
 
 ---
@@ -349,23 +349,25 @@ helm version
 Add the CloudNativePG Helm repository:
 
 ```bash
-helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm repo update
+sudo helm repo add cnpg https://cloudnative-pg.github.io/charts
+sudo helm repo update
 ```
 
 Install the operator:
 
 ```bash
-helm install cnpg \
+sudo helm install cnpg \
   --namespace cnpg-system \
   --create-namespace \
-  cnpg/cloudnative-pg
+  cnpg/cloudnative-pg \
+  --kubeconfig \
+  /etc/rancher/k3s/k3s.yaml
 ```
 
 Verify:
 
 ```bash
-kubectl get pods -n cnpg-system
+kb  get pods -n cnpg-system
 ```
 
 Do not continue until the CNPG Operator is `Running` and `Ready`.
@@ -376,26 +378,45 @@ Do not continue until the CNPG Operator is `Running` and `Ready`.
 
 Apply the PostgreSQL cluster:
 
+Create a cluster postgress-cluster
 ```bash
-kubectl apply -f kubernetes/postgres-cluster.yaml
+mkdir -p ~/kubernetes
+vim ~/kubernetes/postgres-cluster.yaml
+
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+
+metadata:
+  name: airis-postgres
+  namespace: cnpg-system
+
+spec:
+  instances: 1
+
+  storage:
+    size: 1Gi
+
+```
+```bash
+kb  apply -f kubernetes/postgres-cluster.yaml
 ```
 
 Verify:
 
 ```bash
-kubectl get clusters -n cnpg-system
+kb  get clusters -n cnpg-system # need to be Cluster in healthy state
 ```
 
 Check the pods:
 
 ```bash
-kubectl get pods -n cnpg-system
+kb  get pods -n cnpg-system
 ```
 
 Check persistent storage:
 
 ```bash
-kubectl get pvc -n cnpg-system
+kb  get pvc -n cnpg-system
 ```
 
 The PostgreSQL PVC should be `Bound`.
@@ -407,32 +428,41 @@ The PostgreSQL PVC should be `Bound`.
 Apply the NodePort service:
 
 ```bash
-kubectl apply -f kubernetes/postgres-nodeport.yaml
+vim ~/kubernetes/postgres-nodeport.yaml
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: postgres-bastion
+  namespace: cnpg-system
+
+spec:
+  type: NodePort
+
+  selector:
+    cnpg.io/cluster: airis-postgres
+    cnpg.io/instanceRole: primary
+
+  ports:
+    - name: postgres
+      protocol: TCP
+      port: 5432
+      targetPort: 5432
+      nodePort: 30432
+```
+```bash
+kb  apply -f kubernetes/postgres-nodeport.yaml
 ```
 
 Verify:
 
 ```bash
-kubectl get svc -n cnpg-system
+kb  get svc -n cnpg-system
 ```
 
-Expected private endpoint:
-
 ```text
-10.0.0.20:30432
-```
-
-The GCP firewall should allow TCP/30432 only from the Bastion private IP:
-
-```text
-Source:
-10.0.0.10/32
-
-Destination:
-K3s VM
-
-Port:
-TCP/30432
+NAME                TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)
+postgres-bastion    NodePort   10.43.x.x       <none>        5432:30432/TCP
 ```
 
 ---
@@ -529,6 +559,60 @@ source venv/bin/activate
 Run:
 
 ```bash
+vim validate_db.py
+```
+
+```bash
+import os
+import psycopg
+
+DB_HOST = "10.0.0.20"
+DB_PORT = 30432
+DB_NAME = "app"
+DB_USER = "app"
+DB_PASSWORD = os.environ["DB_PASSWORD"]
+
+try:
+    with psycopg.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=5,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+            result = cur.fetchone()
+
+            print(f"PostgreSQL connection successful: {result}")
+
+except Exception as e:
+    print(f"PostgreSQL validation failed: {e}")
+    raise
+```
+
+```text
+Get the password from secret from k3s
+```
+
+```bash
+ssh k3s
+```
+
+```bash
+kb get secret airis-postgres-app -n cnpg-system -o jsonpath='{.data.password}' | base64 -d
+```
+
+```text
+Then go back to the Bastion and set it only in the environment:
+```
+
+```bash
+export DB_PASSWORD='PASTE_PASSWORD_HERE'
+```
+
+```bash
 python3 validate_db.py
 ```
 
@@ -558,11 +642,11 @@ It does not prove HA, replication health, performance, storage capacity, or full
 Before considering the deployment complete, verify:
 
 ```bash
-kubectl get nodes
-kubectl get pods -A
-kubectl get clusters -n cnpg-system
-kubectl get pvc -n cnpg-system
-kubectl get svc -n cnpg-system
+kb  get nodes
+kb  get pods -A
+kb  get clusters -n cnpg-system
+kb  get pvc -n cnpg-system
+kb  get svc -n cnpg-system
 ```
 
 Confirm:
